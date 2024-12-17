@@ -1,4 +1,134 @@
 (ns co.gaiwan.slack-event-sink
   (:require
+   [charred.api :as charred]
+   [clojure.java.io :as io]
+   [co.gaiwan.slack.api :as slack]
+   [co.gaiwan.slack.raw-event :as raw-event]
+   [co.gaiwan.slack.time-util :as time-util]
+   [hato.client :as hato]
+   [lambdaisland.config :as config]
    [ring.adapter.jetty :as jetty]
-   [lambdaisland.cli :as cli]))
+   [ring.util.request :as req])
+  (:import
+   (javax.crypto Mac)
+   (javax.crypto.spec SecretKeySpec)))
+
+(set! *warn-on-reflection* true)
+
+(def config (config/create {:prefix "slack-event-sink"}))
+
+(def ^Mac hmac-sha-256 (Mac/getInstance "HMACSHA256"))
+
+(def signing-key
+  (delay
+    (SecretKeySpec.
+     (.getBytes ^String (config/get config :slack/signing-secret))
+     (.getAlgorithm hmac-sha-256))))
+
+(defn signature [^String body]
+  (apply str
+         (map #(format "%02x" %)
+              (.doFinal (doto hmac-sha-256
+                          (.init @signing-key)
+                          (.update (.getBytes body)))))))
+
+(defn header [req h]
+  (get-in req [:headers h]))
+
+(defn wrap-body-params [f]
+  (fn [req]
+    (def rr req)
+    (let [body      (slurp (:body req))
+          slack-sig (header req "x-slack-signature")
+          slack-ts  (some-> (header req "x-slack-request-timestamp") parse-long)
+          now-ts    (long (/ (System/currentTimeMillis) 1000))
+          sig       (signature (str "v0:" slack-ts ":" body))]
+      (cond
+        (not= (str "v0=" sig) slack-sig)
+        {:status 403
+         :body "signature mismatch"}
+
+        (or (not slack-ts)
+            (< 2 (Math/abs (- now-ts (long slack-ts)))))
+        {:status 403
+         :body "timestamp mismatch"}
+
+        (not= "application/json" (req/content-type req))
+        {:status 415
+         :body "content-type must be application/json"}
+
+        :else
+        (f (assoc req :body-params (charred/read-json body)))))))
+
+(defn wrap-log-req [f]
+  (fn [req]
+    (try
+      (let [res (f req)]
+        (println
+         (get-in req [:body-params "event" "event_ts"])
+         (get-in req [:body-params "event" "type"])
+         (:status res))
+        res)
+      (catch Throwable e
+        (println "ERROR" e)
+        {:status 200}))))
+
+(def file-info (slack/simple-endpoint "files.info"))
+
+(defn archive-json-path [team-id e]
+  (when team-id
+    (let [ts (raw-event/message-ts e)
+          day (time-util/format-inst-day(time-util/ts->inst  "1734425456.329100"))]
+      (str team-id "/" (or (raw-event/channel-id e) "META") "/" day ".jsonl"))))
+
+(defn download-file! [team-id id]
+  (let [info (file-info (slack/conn (config/get config :slack/bot-token))
+                        {:file id})
+        info-file (io/file (config/get config :archive/path)
+                           (str team-id "/FILES/" id ".json"))
+        data-file (io/file (config/get config :archive/path)
+                           (str team-id "/FILES/" id))
+        url (get-in info ["file" "url_private_download"])]
+    (io/make-parents info-file)
+    (spit info-file (charred/write-json-str info))
+    (with-open [f (io/output-stream data-file)]
+      (io/copy
+       (:body (hato/get url {:as :stream
+                             :oauth-token (config/get config :slack/bot-token)}))
+       data-file))))
+
+(defn handler [{:keys [body-params] :as req}]
+  (def req req)
+  (let [{:strs [event team_id type token challenge]} body-params
+        ]
+    (if (= "url_verification" type)
+      {:status 200
+       :headers {"content-type" "text/plain"}
+       :body challenge}
+      (let [ts (raw-event/message-ts event)
+            file (io/file (config/get config :archive/path)
+                          (archive-json-path team_id event))]
+        (when file
+          (io/make-parents file)
+          (spit file (str (charred/write-json-str event) "\n") :append true))
+        (when (= "file_shared" (raw-event/type event))
+          (future
+            (download-file! team_id (get-in event ["file" "id"]))))
+        {:status 200}))))
+
+(defonce jetty nil)
+
+(defn start! []
+  (alter-var-root
+   #'jetty
+   (fn [jetty]
+     (when jetty
+       (.stop ^org.eclipse.jetty.server.Server jetty))
+     (jetty/run-jetty
+      (-> #'handler
+          wrap-log-req
+          wrap-body-params)
+      {:port (config/get config :http/port)
+       :join? false}))))
+
+(start!)
