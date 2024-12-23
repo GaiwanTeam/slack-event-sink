@@ -28,7 +28,7 @@
     },
     "settings": {
         "event_subscriptions": {
-            "request_url": "https://50b98aa6c163.ngrok.io/slack/events",
+            "request_url": "https://slack-event-sink.frp.apps.gaiwan.co/event",
             "bot_events": [
                 "channel_archive",
                 "channel_created",

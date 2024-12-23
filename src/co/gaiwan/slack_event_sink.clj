@@ -6,7 +6,10 @@
    [co.gaiwan.slack.raw-event :as raw-event]
    [co.gaiwan.slack.time-util :as time-util]
    [hato.client :as hato]
+   [io.pedestal.log :as log]
+   [lambdaisland.cli :as cli]
    [lambdaisland.config :as config]
+   [lambdaisland.config.cli :as config-cli]
    [ring.adapter.jetty :as jetty]
    [ring.util.request :as req])
   (:import
@@ -15,7 +18,9 @@
 
 (set! *warn-on-reflection* true)
 
-(def config (config/create {:prefix "slack-event-sink"}))
+(def config
+  (-> (config/create {:prefix "slack-event-sink"})
+      config-cli/add-provider))
 
 (def ^Mac hmac-sha-256 (Mac/getInstance "HMACSHA256"))
 
@@ -98,9 +103,7 @@
        data-file))))
 
 (defn handler [{:keys [body-params] :as req}]
-  (def req req)
-  (let [{:strs [event team_id type token challenge]} body-params
-        ]
+  (let [{:strs [event team_id type token challenge]} body-params]
     (if (= "url_verification" type)
       {:status 200
        :headers {"content-type" "text/plain"}
@@ -118,17 +121,42 @@
 
 (defonce jetty nil)
 
-(defn start! []
-  (alter-var-root
-   #'jetty
-   (fn [jetty]
-     (when jetty
-       (.stop ^org.eclipse.jetty.server.Server jetty))
-     (jetty/run-jetty
-      (-> #'handler
-          wrap-log-req
-          wrap-body-params)
-      {:port (config/get config :http/port)
-       :join? false}))))
+(defn start! [opts]
+  (let [port (config/get config :http/port)
+        path (config/get config :archive/path)]
+    (log/info :http/starting {:port port
+                              :path path})
+    (log/info :bot-token/source (config/source config :slack/bot-token))
+    (log/info :signing-secret/source (config/source config :slack/signing-secret))
+    (alter-var-root
+     #'jetty
+     (fn [jetty]
+       (when jetty
+         (.stop ^org.eclipse.jetty.server.Server jetty))
+       (jetty/run-jetty
+        (-> #'handler
+            wrap-log-req
+            wrap-body-params)
+        {:port (config/get config :http/port)
+         :join? false})))))
 
-(start!)
+(def cmdspec
+  {:name "slack-event-sink"
+   :doc "Listen for events from Slack coming in through the Event API and captures them.
+
+         Events are stored in JSONL files in  a channel/date hierarchy."
+   :commands
+   ["start <slack/signing-secret>" #'start!
+    "inspect  <slack/signing-secret>" #'prn]
+   :flags
+   ["--port <port>" {:key :http/port
+                     :doc "HTTP port to listen on"}
+    "--path <path>"  {:key :archive/path
+                      :doc "Location where the write the archive (directory)"}
+    "--bot-token <token>" {:key :slack/bot-token
+                           :doc "Slack bot token"}
+    "--signing-secret <secret>" {:key :slack/signing-secret
+                                 :doc "Slack signing secret"}]})
+
+(defn -main [& argv]
+  (cli/dispatch* cmdspec argv))

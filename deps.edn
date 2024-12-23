@@ -1,12 +1,13 @@
 {:paths ["src" "resources"]
 
  :deps
- {org.clojure/clojure     {:mvn/version "1.12.0"}
-  ring/ring-jetty-adapter {:mvn/version "2.0.0-alpha1"}
-  co.gaiwan/clj-slack     {:git/url "https://github.com/GaiwanTeam/clj-slack"
-                           :git/sha "bba565541d868e3e234552a48c2a5ee512b1451a"}
-  com.lambdaisland/cli    {:mvn/version "0.18.74"}
-  com.lambdaisland/config {:mvn/version "0.1.6"}}
+ {org.clojure/clojure      {:mvn/version "1.12.0"}
+  ring/ring-jetty-adapter  {:mvn/version "1.13.0"}
+  co.gaiwan/clj-slack      {:git/url "https://github.com/GaiwanTeam/clj-slack"
+                            :git/sha "bba565541d868e3e234552a48c2a5ee512b1451a"}
+  com.lambdaisland/cli     {:mvn/version "0.18.74"}
+  com.lambdaisland/config  {:mvn/version "0.3.13"}
+  io.pedestal/pedestal.log {:mvn/version "0.7.2"}}
 
  :aliases
  {:dev
