@@ -5,8 +5,8 @@
   ring/ring-jetty-adapter  {:mvn/version "1.13.0"}
   co.gaiwan/clj-slack      {:git/url "https://github.com/GaiwanTeam/clj-slack"
                             :git/sha "bba565541d868e3e234552a48c2a5ee512b1451a"}
-  com.lambdaisland/cli     {:mvn/version "0.18.74"}
-  com.lambdaisland/config  {:mvn/version "0.3.13"}
+  com.lambdaisland/cli     {:mvn/version "0.19.78"}
+  com.lambdaisland/config  {:mvn/version "0.4.17"}
   io.pedestal/pedestal.log {:mvn/version "0.7.2"}}
 
  :aliases
