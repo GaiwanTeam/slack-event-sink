@@ -146,8 +146,8 @@
 
          Events are stored in JSONL files in  a channel/date hierarchy."
    :commands
-   ["start <slack/signing-secret>" #'start!
-    "inspect  <slack/signing-secret>" #'prn]
+   ["start" #'start!
+    "inspect" #'prn]
    :flags
    ["--port <port>" {:key :http/port
                      :doc "HTTP port to listen on"}
