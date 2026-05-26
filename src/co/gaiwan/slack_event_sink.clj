@@ -42,7 +42,6 @@
 
 (defn wrap-body-params [f]
   (fn [req]
-    (def rr req)
     (let [body      (slurp (:body req))
           slack-sig (header req "x-slack-signature")
           slack-ts  (some-> (header req "x-slack-request-timestamp") parse-long)
@@ -63,7 +62,8 @@
          :body "content-type must be application/json"}
 
         :else
-        (f (assoc req :body-params (charred/read-json body)))))))
+        (let [body-params (charred/read-json body)]
+          (f (assoc req :body-params body-params)))))))
 
 (defn wrap-log-req [f]
   (fn [req]
@@ -83,7 +83,7 @@
 (defn archive-json-path [team-id e]
   (when team-id
     (let [ts (raw-event/message-ts e)
-          day (time-util/format-inst-day(time-util/ts->inst  "1734425456.329100"))]
+          day (time-util/format-inst-day (time-util/ts->inst ts))]
       (str team-id "/" (or (raw-event/channel-id e) "META") "/" day ".jsonl"))))
 
 (defn download-file! [team-id id]
@@ -96,6 +96,7 @@
         url (get-in info ["file" "url_private_download"])]
     (io/make-parents info-file)
     (spit info-file (charred/write-json-str info))
+    (println "Downloading" url "to" data-file)
     (with-open [f (io/output-stream data-file)]
       (io/copy
        (:body (hato/get url {:as :stream
@@ -135,8 +136,8 @@
          (.stop ^org.eclipse.jetty.server.Server jetty))
        (jetty/run-jetty
         (-> #'handler
-            wrap-log-req
-            wrap-body-params)
+            wrap-body-params
+            wrap-log-req)
         {:port (config/get config :http/port)
          :join? false})))))
 
@@ -160,3 +161,7 @@
 
 (defn -main [& argv]
   (cli/dispatch* cmdspec argv))
+
+(comment
+  (def +j (start! {}))
+  (.stop +j))
