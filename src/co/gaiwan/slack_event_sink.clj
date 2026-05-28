@@ -2,6 +2,7 @@
   (:require
    [charred.api :as charred]
    [clojure.java.io :as io]
+   [clojure.pprint :as pprint]
    [co.gaiwan.slack.api :as slack]
    [co.gaiwan.slack.raw-event :as raw-event]
    [co.gaiwan.slack.time-util :as time-util]
@@ -65,18 +66,36 @@
         (let [body-params (charred/read-json body)]
           (f (assoc req :body-params body-params)))))))
 
-(defn wrap-log-req [f]
-  (fn [req]
-    (try
-      (let [res (f req)]
+(defn wrap-log-req [f opts]
+  (if (:verbose opts)
+    (fn [req]
+      (try
+        (println "------------------------------")
         (println
-         (get-in req [:body-params "event" "event_ts"])
-         (get-in req [:body-params "event" "type"])
+         (str/upper-case (symbol (:request-method req)))
+         (:uri req)
          (:status res))
-        res)
-      (catch Throwable e
-        (println "ERROR" e)
-        {:status 200}))))
+        (pprint/pprint req)
+        (let [res (f req)]
+          (println "----")
+          (pprint/pprint res)
+          res)
+        (catch Throwable e
+          (println "ERROR" e)
+          {:status 200})))
+    (fn [req]
+      (try
+        (let [res (f req)]
+          (println
+           (str/upper-case (symbol (:request-method req)))
+           (:uri req)
+           (:status res)
+           (str "type=" (get-in req [:body-params "event" "type"]))
+           (str "event_ts=" (get-in req [:body-params "event" "event_ts"])))
+          res)
+        (catch Throwable e
+          (println "ERROR" e)
+          {:status 200})))))
 
 (def file-info (slack/simple-endpoint "files.info"))
 
@@ -109,20 +128,25 @@
       {:status 200
        :headers {"content-type" "text/plain"}
        :body challenge}
-      (let [ts (raw-event/message-ts event)
-            file (io/file (config/get config :archive/path)
-                          (archive-json-path team_id event))]
-        (when file
-          (io/make-parents file)
-          (spit file (str (charred/write-json-str event) "\n") :append true))
-        (when (= "file_shared" (raw-event/type event))
-          (future
-            (download-file! team_id (get-in event ["file" "id"]))))
-        {:status 200}))))
+      (if-let [ts (raw-event/message-ts event)]
+        (let [file (io/file (config/get config :archive/path)
+                            (archive-json-path team_id event))]
+          (when file
+            (io/make-parents file)
+            (spit file (str (charred/write-json-str event) "\n") :append true))
+          (when (= "file_shared" (raw-event/type event))
+            (future
+              (download-file! team_id (get-in event ["file" "id"]))))
+          {:status 200})
+        (do
+          (println "No timestamp:" (pr-str body-params))
+          {:status 200})))))
 
 (defonce jetty nil)
 
-(defn start! [opts]
+(defn start!
+  "Start slack-event-sink"
+  [opts]
   (let [port (config/get config :http/port)
         path (config/get config :archive/path)]
     (log/info :http/starting {:port port
@@ -137,7 +161,7 @@
        (jetty/run-jetty
         (-> #'handler
             wrap-body-params
-            wrap-log-req)
+            (wrap-log-req opts))
         {:port (config/get config :http/port)
          :join? false})))))
 
@@ -147,8 +171,7 @@
 
          Events are stored in JSONL files in  a channel/date hierarchy."
    :commands
-   ["start" #'start!
-    "inspect" #'prn]
+   ["start" #'start!]
    :flags
    ["--port <port>" {:key :http/port
                      :doc "HTTP port to listen on"}
@@ -157,7 +180,8 @@
     "--bot-token <token>" {:key :slack/bot-token
                            :doc "Slack bot token"}
     "--signing-secret <secret>" {:key :slack/signing-secret
-                                 :doc "Slack signing secret"}]})
+                                 :doc "Slack signing secret"}
+    "--verbose,-v" "Increase verbosity"]})
 
 (defn -main [& argv]
   (cli/dispatch* cmdspec argv))
