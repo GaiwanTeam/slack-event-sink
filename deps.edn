@@ -2,11 +2,11 @@
 
  :deps
  {org.clojure/clojure      {:mvn/version "1.12.5"}
-  ring/ring-jetty-adapter  {:mvn/version "1.15.4"}
+  ring/ring-jetty-adapter  {:mvn/version "1.15.5"}
   co.gaiwan/clj-slack      {:git/url "https://github.com/GaiwanTeam/clj-slack"
-                            :git/sha "dffee0994269730240b6e322e7182f8c53ddd2a6"}
-  com.lambdaisland/cli     {:mvn/version "1.29.127"}
-  com.lambdaisland/config  {:mvn/version "0.10.37"}
+                            :git/sha "2a53aa80d287ead5ead392a6cc259fc199a5d2ab"}
+  com.lambdaisland/cli     {:mvn/version "1.30.130"}
+  com.lambdaisland/config  {:mvn/version "0.14.53"}
   io.pedestal/pedestal.log {:mvn/version "0.8.1"}}
 
  :aliases
