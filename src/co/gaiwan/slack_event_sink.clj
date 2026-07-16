@@ -3,6 +3,7 @@
    [charred.api :as charred]
    [clojure.java.io :as io]
    [clojure.pprint :as pprint]
+   [clojure.string :as str]
    [co.gaiwan.slack.api :as slack]
    [co.gaiwan.slack.raw-event :as raw-event]
    [co.gaiwan.slack.time-util :as time-util]
@@ -73,8 +74,7 @@
         (println "------------------------------")
         (println
          (str/upper-case (symbol (:request-method req)))
-         (:uri req)
-         (:status res))
+         (:uri req))
         (pprint/pprint req)
         (let [res (f req)]
           (println "----")
