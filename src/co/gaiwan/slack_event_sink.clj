@@ -160,8 +160,8 @@
          (.stop ^org.eclipse.jetty.server.Server jetty))
        (jetty/run-jetty
         (-> #'handler
-            wrap-body-params
-            (wrap-log-req opts))
+            (wrap-log-req opts)
+            wrap-body-params)
         {:port (config/get config :http/port)
          :join? false})))))
 
