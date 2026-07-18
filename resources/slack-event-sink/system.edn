@@ -1,0 +1,14 @@
+{co.gaiwan.slack-event-sink/http-server
+ {:port           #config :http/port
+  :verbose        #config :verbose
+  :signing-secret #config :slack/signing-secret
+  :event-handlers #makina/refset :slack/event-handler}
+
+ co.gaiwan.slack-event-sink/archive-handler
+ {:makina/type  :slack/event-handler
+  :archive-path #config :archive/path
+  :bot-token    #config :slack/bot-token}
+
+ co.gaiwan.slack-event-sink/unix-socket-handler
+ {:makina/type  :slack/event-handler
+  :socket-path  #config :slack/unix-socket}}

@@ -1,2 +1,5 @@
-{:http/port 8123
- :archive/path "archive"}
+{:http/port            8123
+ :archive/path         "archive"
+ :slack/signing-secret ""
+ :slack/bot-token      ""
+ :slack/unix-socket    nil}

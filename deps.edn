@@ -7,6 +7,7 @@
                             :git/sha "610a518e63aeef25bcf5d980be06a3c3f1dd33aa"}
   com.lambdaisland/cli     {:mvn/version "1.30.130"}
   com.lambdaisland/config  {:mvn/version "0.15.56"}
+  com.lambdaisland/makina  {:mvn/version "0.7.32"}
   io.pedestal/pedestal.log {:mvn/version "0.8.1"}}
 
  :aliases

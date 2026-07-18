@@ -13,9 +13,13 @@
    [lambdaisland.cli :as cli]
    [lambdaisland.config :as config]
    [lambdaisland.config.cli :as config-cli]
+   [lambdaisland.makina.app :as app]
    [ring.adapter.jetty :as jetty]
    [ring.util.request :as req])
   (:import
+   (java.net StandardProtocolFamily UnixDomainSocketAddress)
+   (java.nio ByteBuffer)
+   (java.nio.channels SelectionKey Selector ServerSocketChannel SocketChannel)
    (javax.crypto Mac)
    (javax.crypto.spec SecretKeySpec)))
 
@@ -27,29 +31,23 @@
 
 (def ^Mac hmac-sha-256 (Mac/getInstance "HMACSHA256"))
 
-(def signing-key
-  (delay
-    (SecretKeySpec.
-     (.getBytes ^String (config/get config :slack/signing-secret))
-     (.getAlgorithm hmac-sha-256))))
-
-(defn signature [^String body]
+(defn signature [^SecretKeySpec signing-key ^String body]
   (apply str
          (map #(format "%02x" %)
               (.doFinal (doto hmac-sha-256
-                          (.init @signing-key)
+                          (.init signing-key)
                           (.update (.getBytes body)))))))
 
 (defn header [req h]
   (get-in req [:headers h]))
 
-(defn wrap-body-params [f]
+(defn wrap-body-params [f ^SecretKeySpec signing-key]
   (fn [req]
     (let [body      (slurp (:body req))
           slack-sig (header req "x-slack-signature")
           slack-ts  (some-> (header req "x-slack-request-timestamp") parse-long)
           now-ts    (long (/ (System/currentTimeMillis) 1000))
-          sig       (signature (str "v0:" slack-ts ":" body))]
+          sig       (signature signing-key (str "v0:" slack-ts ":" body))]
       (cond
         (not= (str "v0=" sig) slack-sig)
         {:status 403
@@ -66,7 +64,9 @@
 
         :else
         (let [body-params (charred/read-json body)]
-          (f (assoc req :body-params body-params)))))))
+          (f (-> req
+                 (assoc :body-str body)
+                 (assoc :body-params body-params))))))))
 
 (defn wrap-log-req [f opts]
   (if (:verbose opts)
@@ -106,12 +106,12 @@
           day (time-util/format-inst-day (time-util/ts->inst ts))]
       (str team-id "/" (or (raw-event/channel-id e) "META") "/" day ".jsonl"))))
 
-(defn download-file! [team-id id]
-  (let [info (file-info (slack/conn (config/get config :slack/bot-token))
+(defn download-file! [bot-token archive-path team-id id]
+  (let [info (file-info (slack/conn bot-token)
                         {:file id})
-        info-file (io/file (config/get config :archive/path)
+        info-file (io/file archive-path
                            (str team-id "/FILES/" id ".json"))
-        data-file (io/file (config/get config :archive/path)
+        data-file (io/file archive-path
                            (str team-id "/FILES/" id))
         url (get-in info ["file" "url_private_download"])]
     (io/make-parents info-file)
@@ -120,51 +120,143 @@
     (with-open [f (io/output-stream data-file)]
       (io/copy
        (:body (hato/get url {:as :stream
-                             :oauth-token (config/get config :slack/bot-token)}))
+                             :oauth-token bot-token}))
        data-file))))
 
-(defn handler [{:keys [body-params] :as req}]
-  (let [{:strs [event team_id type token challenge]} body-params]
-    (if (= "url_verification" type)
-      {:status 200
-       :headers {"content-type" "text/plain"}
-       :body challenge}
-      (if-let [ts (raw-event/message-ts event)]
-        (let [file (io/file (config/get config :archive/path)
-                            (archive-json-path team_id event))]
-          (when file
-            (io/make-parents file)
-            (spit file (str (charred/write-json-str event) "\n") :append true))
-          (when (= "file_shared" (raw-event/type event))
-            (future
-              (download-file! team_id (get-in event ["file" "id"]))))
-          {:status 200})
-        (do
-          (println "No timestamp:" (pr-str body-params))
-          {:status 200})))))
+(defn make-handler [event-handlers]
+  (fn [req]
+    (let [{:keys [body-params]} req
+          {:strs [type challenge]} body-params]
+      (if (= "url_verification" type)
+        {:status 200
+         :headers {"content-type" "text/plain"}
+         :body challenge}
+        (let [errors? (volatile! false)]
+          (doseq [h event-handlers]
+            (try
+              (h req)
+              (catch Throwable e
+                (log/error :event-handler/failed {} :exception e)
+                (vreset! errors? true))))
+          (if @errors?
+            {:status 500}
+            {:status 200}))))))
 
-(defonce jetty nil)
+(def archive-handler
+  {:start
+   (fn [{:keys [archive-path bot-token]}]
+     (fn [req]
+       (let [{:strs [event team_id]} (:body-params req)]
+         (if-let [ts (raw-event/message-ts event)]
+           (let [file (io/file archive-path
+                               (archive-json-path team_id event))]
+             (when file
+               (io/make-parents file)
+               (spit file (str (charred/write-json-str event) "\n") :append true))
+             (when (= "file_shared" (raw-event/type event))
+               (future
+                 (download-file! bot-token archive-path team_id (get-in event ["file" "id"])))))
+           (println "No timestamp:" (pr-str (:body-params req)))))))
+   :stop identity})
+
+(defn start-unix-socket [socket-path state]
+  (future
+    (try
+      (log/info :unix-socket/starting {:path socket-path})
+      (let  [path        (java.nio.file.Path/of socket-path (into-array String []))
+             _           (.delete (.toFile path))
+             addr        (UnixDomainSocketAddress/of path)
+             server-chan (ServerSocketChannel/open StandardProtocolFamily/UNIX)
+             selector    (Selector/open)]
+        (.bind server-chan addr)
+        (.configureBlocking server-chan false)
+        (.register server-chan selector SelectionKey/OP_ACCEPT)
+        (while true
+          (let [n (.select selector)]
+            (when (pos? n)
+              (let [selected (java.util.ArrayList. (.selectedKeys selector))]
+                (.clear (.selectedKeys selector))
+                (doseq [^SelectionKey key selected]
+                  (when (.isValid key)
+                    (try
+                      (cond
+                        (.isAcceptable key)
+                        (let [server ^ServerSocketChannel (.channel key)
+                              client ^SocketChannel (.accept server)]
+                          (.configureBlocking client false)
+                          (.register client selector SelectionKey/OP_READ)
+                          (let [[{:keys [buffer]}]
+                                (swap-vals! state
+                                            (fn [s] (-> s
+                                                        (assoc :buffer [])
+                                                        (update :clients conj client))))]
+                            (doseq [msg buffer]
+                              (try
+                                (.write client (ByteBuffer/wrap (.getBytes ^String msg "UTF-8")))
+                                (catch Exception e
+                                  (log/error :unix-socket/flush-failed {} :exception e))))))
+
+                        (.isReadable key)
+                        (let [client ^SocketChannel (.channel key)
+                              buf (ByteBuffer/allocate 1)]
+                          (when (= -1 (.read client buf))
+                            (.cancel key)
+                            (.close client)
+                            (swap! state update :clients disj client))))
+                      (catch Exception e
+                        (log/error :unix-socket/selector-failed {} :exception e)
+                        (.cancel key)
+                        (when-let [ch (.channel key)]
+                          (.close ch)
+                          (swap! state update :clients disj ch)))))))))))
+      (catch Exception e
+        (log/error :unix-socket/main-loop-broke {} :exception e)))))
+
+(def unix-socket-handler
+  {:start
+   (fn [{:keys [socket-path]}]
+     (if-not socket-path
+       identity
+       (let [state (atom {:clients #{} :buffer []})]
+         (start-unix-socket socket-path state)
+         (fn [req]
+           (let [{:keys [clients]} @state]
+             (if (seq clients)
+               (doseq [^SocketChannel c clients]
+                 (try
+                   (.write c (ByteBuffer/wrap (.getBytes ^String (:body-str req) "UTF-8")))
+                   (catch Exception e
+                     (log/error :unix-socket/write-failed {} :exception e)
+                     (swap! state update :clients disj c))))
+               (swap! state update :buffer conj (:body-str req))))))))})
+
+(def http-server
+  {:start
+   (fn [{:keys [port verbose event-handlers signing-secret]}]
+     (let [signing-key (SecretKeySpec.
+                        (.getBytes ^String signing-secret)
+                        (.getAlgorithm hmac-sha-256))]
+       (log/info :http/starting {:port port})
+       (jetty/run-jetty
+        (-> (make-handler event-handlers)
+            (wrap-log-req {:verbose verbose})
+            (wrap-body-params signing-key))
+        {:port port
+         :join? false})))
+   :stop
+   (fn [server]
+     (when server
+       (.stop ^org.eclipse.jetty.server.Server server)))})
+
+(defonce system
+  (app/create
+   {:prefix "slack-event-sink"
+    :data-readers {'config (partial config/get config)}}))
 
 (defn start!
-  "Start slack-event-sink"
-  [opts]
-  (let [port (config/get config :http/port)
-        path (config/get config :archive/path)]
-    (log/info :http/starting {:port port
-                              :path path})
-    (log/info :bot-token/source (config/source config :slack/bot-token))
-    (log/info :signing-secret/source (config/source config :slack/signing-secret))
-    (alter-var-root
-     #'jetty
-     (fn [jetty]
-       (when jetty
-         (.stop ^org.eclipse.jetty.server.Server jetty))
-       (jetty/run-jetty
-        (-> #'handler
-            (wrap-log-req opts)
-            wrap-body-params)
-        {:port (config/get config :http/port)
-         :join? false})))))
+  "Start Slack-event-sink"
+  [& _]
+  (app/start! system))
 
 (def cmdspec
   {:name "slack-event-sink"
@@ -182,11 +274,12 @@
                            :doc "Slack bot token"}
     "--signing-secret <secret>" {:key :slack/signing-secret
                                  :doc "Slack signing secret"}
-    "--verbose,-v" "Increase verbosity"]})
+    "--verbose,-v" {:key :verbose
+                    :doc "Increase verbosity"}]})
 
 (defn -main [& argv]
   (cli/dispatch* cmdspec argv))
 
 (comment
-  (def +j (start! {}))
-  (.stop +j))
+  (start!)
+  (stop!))
