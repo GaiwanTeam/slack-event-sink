@@ -1,4 +1,5 @@
 (ns co.gaiwan.slack-event-sink
+  "Receive events from slack, store them in files"
   (:require
    [charred.api :as charred]
    [clojure.java.io :as io]
