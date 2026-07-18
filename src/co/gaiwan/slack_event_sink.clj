@@ -183,6 +183,7 @@
                         (.isAcceptable key)
                         (let [server ^ServerSocketChannel (.channel key)
                               client ^SocketChannel (.accept server)]
+                          (log/info :socket/client-connected {})
                           (.configureBlocking client false)
                           (.register client selector SelectionKey/OP_READ)
                           (let [[{:keys [buffer]}]
